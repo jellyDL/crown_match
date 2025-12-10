@@ -39,7 +39,7 @@ def preprocess(stl_file):
     # pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=VOXEL*2, max_nn=30))
     # return pcd
     mesh = o3d.io.read_triangle_mesh(stl_file)
-    pcd = mesh.sample_points_uniformly(number_of_points=1000)
+    pcd = mesh.sample_points_uniformly(number_of_points=50000)
     return pcd
 
 def trimmed_chamfer(src, tgt, trim=TRIM_FRAC):
@@ -64,37 +64,29 @@ def fine_match(query, candidate_paths, topk=TOPK):
         
         # 读取 STL 网格文件并采样点云
         mesh = o3d.io.read_triangle_mesh(stl_file)
-        model = mesh.sample_points_uniformly(number_of_points=1000)
+        model = mesh.sample_points_uniformly(number_of_points=50000)
         
         # 确保模型点云有法线
         model.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=VOXEL*2, max_nn=30))
         
         try:
-            # 1. 粗配准：ISS + RANSAC (优化参数以提速)
-            trans = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-                query, model,
-                o3d.pipelines.registration.compute_fpfh_feature(
-                    query, o3d.geometry.KDTreeSearchParamHybrid(radius=VOXEL*5, max_nn=100)),
-                o3d.pipelines.registration.compute_fpfh_feature(
-                    model, o3d.geometry.KDTreeSearchParamHybrid(radius=VOXEL*5, max_nn=100)),
-                mutual_filter=True,  # 启用互滤波加速
-                max_correspondence_distance=VOXEL*20,  # 增大距离阈值
-                estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
-                ransac_n=3,  # 减少采样点数
-                criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 1000)  # 大幅减少迭代次数
-            ).transformation
+            # 方案1: 跳过配准，直接计算多尺度 Chamfer 距离 (最快)
+            # 居中对齐
+            query_centered = query.translate(-query.get_center())
+            model_centered = model.translate(-model.get_center())
             
-            query_t = query.transform(trans)
+            # 尝试多个旋转角度 (简化版配准)
+            best_cd = float('inf')
+            for angle in [0, 90, 180, 270]:  # 绕Z轴旋转
+                R = query_centered.get_rotation_matrix_from_xyz((0, 0, np.radians(angle)))
+                query_rot = query_centered.rotate(R, center=(0, 0, 0))
+                cd = trimmed_chamfer(query_rot, model_centered)
+                if cd < best_cd:
+                    best_cd = cd
             
-            # 2. 精配准 + trimmed CD
-            icp = o3d.pipelines.registration.registration_icp(
-                query_t, model, VOXEL*2, trans,
-                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30))  # 减少ICP迭代
-            query_final = query.transform(icp.transformation)
-            cd = trimmed_chamfer(query_final, model)
-            scores.append((stl_file, cd))
-            print(f'  -> CD: {cd:.4f}')
+            scores.append((stl_file, best_cd))
+            print(f'  -> CD: {best_cd:.4f}')
+            
         except Exception as e:
             print(f'Error processing {stl_file}: {e}')
             continue
@@ -102,19 +94,19 @@ def fine_match(query, candidate_paths, topk=TOPK):
     scores.sort(key=lambda x: x[1])
     return scores[:topk]
 
+# 在 main 中直接返回粗匹配结果
 if __name__ == '__main__':
     db_feat, db_names = load_db('model_db.pkl')
     input_ply = sys.argv[1]
     query_pcd = preprocess(input_ply)
     query_feat = compute_fpfh(query_pcd).mean(axis=0)
-    print("Processing query_pcd:", query_pcd.points.__len__(), "points")
+    print("\nProcessing query_pcd:", query_pcd.points.__len__(), "points")
 
     coarse_idx = global_match(query_feat, db_feat)
     print("Coarse match candidates:", coarse_idx)
-    candidate_paths = [os.path.join('model_library', db_names[i]) for i in coarse_idx]
-    # print("Coarse match candidate_paths:", candidate_paths)
-
-    top5 = fine_match(query_pcd, candidate_paths)
     
-    for ply, score in top5:
-        print(f'{ply}  ->  trimmed-CD = {score:.4f}')
+    # 直接使用粗匹配结果（最快，跳过精细匹配）
+    top5_idx = coarse_idx[:TOPK]
+    for idx in top5_idx:
+        dist = np.linalg.norm(db_feat[idx] - query_feat)
+        print(f'{db_names[idx]}  ->  FPFH-dist = {dist:.4f}')
