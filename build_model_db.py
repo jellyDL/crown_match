@@ -34,7 +34,7 @@ def build_db(model_dir, save_path):
         print("Mesh has", len(mesh.vertices))
         
         # 从网格采样点云
-        pcd = mesh.sample_points_uniformly(number_of_points=50000)
+        pcd = mesh.sample_points_uniformly(number_of_points=10000)
         
         try:
             feat = compute_fpfh(pcd).mean(axis=0)   # 全局 33 维 FPFH 均值

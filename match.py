@@ -6,7 +6,7 @@ import sys
 
 VOXEL   = 0.003
 TRIM_FRAC = 0.30          # 剔除最远 30 % 点，抗残缺
-TOPK    = 5
+TOPK    = 3
 
 def load_db(db_path):
     db = joblib.load(db_path)
@@ -33,14 +33,22 @@ def compute_fpfh(pcd, voxel=0.003):
         pcd, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel*5, max_nn=100))
     return np.asarray(fpfh.data).T      # (N, 33)
 
-def preprocess(stl_file):
-    # pcd = o3d.io.read_point_cloud(pcd_path)
-    # pcd = pcd.voxel_down_sample(VOXEL)
-    # pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=VOXEL*2, max_nn=30))
-    # return pcd
+def preprocess(stl_file, top_fraction=1/3):
     mesh = o3d.io.read_triangle_mesh(stl_file)
-    pcd = mesh.sample_points_uniformly(number_of_points=50000)
-    return pcd
+    pcd = mesh.sample_points_uniformly(number_of_points=10000)
+    
+    # 截取顶部 top_fraction 的点云
+    points = np.asarray(pcd.points)
+    z_coords = points[:, 2]  # Z轴坐标
+    z_threshold = np.percentile(z_coords, (1 - top_fraction) * 100)
+    
+    # 保留 Z 坐标大于阈值的点
+    top_indices = z_coords >= z_threshold
+    pcd_top = pcd.select_by_index(np.where(top_indices)[0])
+    
+    print(f"Original points: {len(points)}, Top {top_fraction*100:.0f}% points: {len(pcd_top.points)}")
+    
+    return pcd_top
 
 def trimmed_chamfer(src, tgt, trim=TRIM_FRAC):
     """双向 trimmed Chamfer 距离"""
@@ -64,7 +72,7 @@ def fine_match(query, candidate_paths, topk=TOPK):
         
         # 读取 STL 网格文件并采样点云
         mesh = o3d.io.read_triangle_mesh(stl_file)
-        model = mesh.sample_points_uniformly(number_of_points=50000)
+        model = mesh.sample_points_uniformly(number_of_points=10000)
         
         # 确保模型点云有法线
         model.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=VOXEL*2, max_nn=30))
@@ -94,16 +102,17 @@ def fine_match(query, candidate_paths, topk=TOPK):
     scores.sort(key=lambda x: x[1])
     return scores[:topk]
 
-# 在 main 中直接返回粗匹配结果
-if __name__ == '__main__':
-    db_feat, db_names = load_db('model_db.pkl')
-    input_ply = sys.argv[1]
-    query_pcd = preprocess(input_ply)
+def match_single_file(input_ply):
+    
+    # 只截取顶部1/3的点云进行匹配
+    query_pcd = preprocess(input_ply, top_fraction=2/3)
+    o3d.io.write_point_cloud("query_pcd.ply", query_pcd)
+    
     query_feat = compute_fpfh(query_pcd).mean(axis=0)
     print("\nProcessing query_pcd:", query_pcd.points.__len__(), "points")
 
     coarse_idx = global_match(query_feat, db_feat)
-    print("Coarse match candidates:", coarse_idx, "\n")
+    # print("Coarse match candidates:", coarse_idx, "\n")
     
     # 直接使用粗匹配结果（最快，跳过精细匹配）
     top5_idx = coarse_idx[:TOPK]
@@ -115,3 +124,35 @@ if __name__ == '__main__':
 
     if db_names[top5_idx[0]] == input_ply.split('/')[-1]:
         print("\n======> Top-1 match is correct!")
+        return True
+    else:
+        print("\n======> Top-1 match is incorrect!")
+        return False
+        
+
+# 在 main 中直接返回粗匹配结果
+if __name__ == '__main__':
+    db_feat, db_names = load_db('model_db.pkl')
+    
+    if len(sys.argv) < 2:
+        print("Usage: python match.py <ply or folder>")
+        exit(1)
+        
+    input_param = sys.argv[1]
+    if os.path.isfile(input_param):    
+        match_single_file(input_param)
+        
+    elif os.path.isdir(input_param):
+        folder = input_param
+        total_count = 0
+        success_count = 0
+        for file in os.listdir(folder):
+            print("Checking file:", file)
+            if file.endswith('.stl'):
+                input_ply = os.path.join(folder, file)
+                print("\n=== Matching for file:", input_ply)
+                ret = match_single_file(input_ply)  
+                if ret is True:
+                    success_count += 1  
+                total_count += 1
+        print(f"\nOverall Top-1 Accuracy: {success_count} / {total_count} = {success_count/total_count:.2%}")
