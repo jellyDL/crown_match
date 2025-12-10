@@ -103,10 +103,15 @@ if __name__ == '__main__':
     print("\nProcessing query_pcd:", query_pcd.points.__len__(), "points")
 
     coarse_idx = global_match(query_feat, db_feat)
-    print("Coarse match candidates:", coarse_idx)
+    print("Coarse match candidates:", coarse_idx, "\n")
     
     # 直接使用粗匹配结果（最快，跳过精细匹配）
     top5_idx = coarse_idx[:TOPK]
-    for idx in top5_idx:
+    for i, idx in enumerate(top5_idx):
         dist = np.linalg.norm(db_feat[idx] - query_feat)
-        print(f'{db_names[idx]}  ->  FPFH-dist = {dist:.4f}')
+        if i == 0:
+            print("[*] ", end="")
+        print(f'{db_names[idx]:<60}  ->  FPFH-dist = {dist:.4f}')
+
+    if db_names[top5_idx[0]] == input_ply.split('/')[-1]:
+        print("\n======> Top-1 match is correct!")
